@@ -1,0 +1,5 @@
+# Backend — dependências Python
+neo4j==5.20.0        # Driver oficial do Neo4j para Python
+fastapi==0.111.0     # Framework web assíncrono
+uvicorn==0.29.0      # Servidor ASGI para rodar o FastAPI
+python-dotenv==1.0.1 # Lê variáveis do arquivo .env
