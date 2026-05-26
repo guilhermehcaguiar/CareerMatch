@@ -9,8 +9,9 @@ load_dotenv()
 # =============================================================================
 # CONFIGURAÇÕES JWT
 # =============================================================================
-# Em produção, use uma chave secreta forte e armazene no .env
-SECRET_KEY  = os.getenv("SECRET_KEY", "career-match-secret-key-2024")
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("ERRO CRÍTICO: A SECRET_KEY não foi encontrada no arquivo .env!")
 ALGORITHM   = "HS256"
 TOKEN_EXPIRE_HOURS = 8
 # Contexto bcrypt para hash de senhas

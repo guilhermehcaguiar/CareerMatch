@@ -2,37 +2,59 @@
 # CREDENCIAIS
 # =============================================================================
 .env
+.env.*
 *.env
+!.env.example
 
 # =============================================================================
-# PYTHON
+# PYTHON / BACKEND
 # =============================================================================
 __pycache__/
 *.py[cod]
-*.pyo
+*$py.class
 .venv/
 venv/
 env/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
 
 # =============================================================================
-# NODE / FRONTEND
+# NODE / FRONTEND (React, Vite, Tailwind)
 # =============================================================================
 node_modules/
+frontend/node_modules/
+dist/
 frontend/dist/
+dist-ssr/
+.vite/
 frontend/.vite/
+.eslintcache
+
+# Logs de gerenciadores de pacotes
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # =============================================================================
 # SISTEMA OPERACIONAL
 # =============================================================================
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+*.log
 
 # =============================================================================
-# IDEs
+# IDEs E EDITORES
 # =============================================================================
 .vscode/
 .idea/
 *.swp
+*.swo
