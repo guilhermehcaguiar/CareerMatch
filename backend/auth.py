@@ -1,60 +1,34 @@
 import os
-from datetime import datetime, timedelta, timezone
+import jwt
+import bcrypt
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 load_dotenv()
-
-# =============================================================================
-# CONFIGURAÇÕES JWT
-# =============================================================================
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError("ERRO CRÍTICO: A SECRET_KEY não foi encontrada no arquivo .env!")
-ALGORITHM   = "HS256"
-TOKEN_EXPIRE_HOURS = 8
-# Contexto bcrypt para hash de senhas
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-# =============================================================================
-# SENHA
-# =============================================================================
+SECRET_KEY = os.getenv("SECRET_KEY", "fallback_secret_key")
+ALGORITHM = "HS256"
 
 def hash_senha(senha: str) -> str:
-    """Gera o hash bcrypt da senha limitando a 72 caracteres para evitar Erro 500."""
-    senha_limitada = senha[:72]
-    return pwd_context.hash(senha_limitada)
+    senha_bytes = senha.encode('utf-8')
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(senha_bytes, salt).decode('utf-8')
 
+def verificar_senha(senha_pura: str, senha_criptografada: str) -> bool:
+    try:
+        return bcrypt.checkpw(senha_pura.encode('utf-8'), senha_criptografada.encode('utf-8'))
+    except Exception:
+        return False
 
-def verificar_senha(senha_plain: str, senha_hash: str) -> bool:
-    """Compara senha em texto plano (limitada a 72 chars) com o hash armazenado."""
-    senha_limitada = senha_plain[:72]
-    return pwd_context.verify(senha_limitada, senha_hash)
-
-
-# =============================================================================
-# JWT
-# =============================================================================
-
-def criar_token(data: dict) -> str:
-    """
-    Gera um token JWT com expiração.
-    O payload inclui os dados do usuário + campo 'exp' (expiração).
-    """
-    payload = data.copy()
-    expira  = datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRE_HOURS)
-    payload.update({"exp": expira})
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
+def criar_token(dados: dict) -> str:
+    dados_copia = dados.copy()
+    expiracao = datetime.utcnow() + timedelta(hours=8)
+    dados_copia.update({"exp": expiracao})
+    return jwt.encode(dados_copia, SECRET_KEY, algorithm=ALGORITHM)
 
 def validar_token(token: str) -> dict:
-    """
-    Decodifica e valida o token JWT.
-    Lança ValueError se inválido ou expirado.
-    """
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
-        raise ValueError("Token inválido ou expirado")
+    except jwt.ExpiredSignatureError:
+        raise ValueError("Token expirado")
+    except jwt.InvalidTokenError:
+        raise ValueError("Token inválido")

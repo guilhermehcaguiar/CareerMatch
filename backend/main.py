@@ -1,19 +1,22 @@
+import os
+import uuid
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
+
+# 🔥 Importações sincronizadas estritamente com o seu database.py e auth.py
 from database import get_session, verify_connection, close_driver
 from auth import hash_senha, verificar_senha, criar_token, validar_token
 
 
 # =============================================================================
-# SCHEMAS (modelos de entrada da API)
+# SCHEMAS
 # =============================================================================
-
 class CadastroSchema(BaseModel):
     nome: str
-    usuario: str       # login único
+    usuario: str
     senha: str
     perfil_atual: str = ""
 
@@ -24,30 +27,30 @@ class LoginSchema(BaseModel):
 class HabilidadeSchema(BaseModel):
     nome: str
 
+class PerfilUpdateSchema(BaseModel):
+    nome: str | None = None
+    usuario: str | None = None
+    perfil_atual: str | None = None
+    senha: str
+
 
 # =============================================================================
-# INICIALIZAÇÃO DO APP
+# APP
 # =============================================================================
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     verify_connection()
     print("✅ Conectado ao Neo4j AuraDB")
     yield
     close_driver()
-    print("🔌 Conexão com Neo4j encerrada")
 
+app = FastAPI(title="CareerMatch API", version="1.0.0", lifespan=lifespan)
 
-app = FastAPI(
-    title="CareerMatch",
-    description="Sistema que usa banco de dados de grafos para recomendar cargos com base nas habilidades do usuário",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
+# CORS configurado para aceitar tráfego amplo local do Vite
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"], 
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -56,60 +59,43 @@ security = HTTPBearer()
 
 
 # =============================================================================
-# DEPENDÊNCIA DE AUTENTICAÇÃO
+# DEPENDÊNCIA JWT
 # =============================================================================
-
 def get_usuario_atual(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """
-    Dependência injetada nos endpoints protegidos.
-    Valida o token JWT do header Authorization: Bearer <token>
-    e retorna o payload com os dados do usuário logado.
-    """
     try:
-        payload = validar_token(credentials.credentials)
-        return payload
+        return validar_token(credentials.credentials)
     except ValueError:
         raise HTTPException(status_code=401, detail="Token inválido ou expirado")
 
 
 # =============================================================================
-# HEALTH CHECK
+# STATUS
 # =============================================================================
-
 @app.get("/", tags=["Status"])
 def root():
-    return {"status": "online", "message": "CareerMatch API"}
+    return {"status": "online"}
 
 
 # =============================================================================
-# AUTH — Cadastro
+# CADASTRO (CORRIGIDO: EXTRAÇÃO SEGURA DO CONTADOR DO NEO4J)
 # =============================================================================
-
 @app.post("/cadastrar", tags=["Auth"])
 def cadastrar(data: CadastroSchema):
-    """
-    Cria um novo usuário no Neo4j.
-    - Verifica se o login já existe
-    - Faz hash da senha com bcrypt antes de salvar
-    - Gera um ID sequencial automático (U001, U002, ...)
-    - Retorna JWT já na resposta para login automático após cadastro
-    """
+    user_clean = data.usuario.strip().lower()
+    
     with get_session() as session:
-
-        # Verifica duplicata de login
         existente = session.run(
             "MATCH (u:Usuario {usuario: $usuario}) RETURN u",
-            usuario=data.usuario
+            usuario=user_clean
         ).single()
-
         if existente:
             raise HTTPException(status_code=400, detail="Usuário já cadastrado")
 
-        # Gera ID sequencial
-        total = session.run("MATCH (u:Usuario) RETURN count(u) AS total").single()["total"]
-        novo_id = f"U{str(total + 1).zfill(3)}"
+        # 🔥 Correção aqui: extração segura usando .value() para evitar travamentos de tipo
+        result_total = session.run("MATCH (u:Usuario) RETURN count(u) AS total").single()
+        total = result_total.value("total") if result_total else 0
+        novo_id = f"U{str(int(total) + 1).zfill(3)}"
 
-        # Cria o nó Usuario com senha hasheada
         session.run(
             """
             CREATE (u:Usuario {
@@ -121,41 +107,35 @@ def cadastrar(data: CadastroSchema):
             })
             """,
             id=novo_id,
-            nome=data.nome,
-            usuario=data.usuario,
+            nome=data.nome.strip(),
+            usuario=user_clean,
             senha_hash=hash_senha(data.senha),
             perfil_atual=data.perfil_atual,
         )
 
-    token = criar_token({"sub": novo_id, "usuario": data.usuario, "nome": data.nome})
-    return {"token": token, "usuario_id": novo_id, "nome": data.nome}
+    token = criar_token({"sub": novo_id, "usuario": user_clean, "nome": data.nome})
+    return {"token": token, "usuario_id": novo_id, "nome": data.nome, "status": "sucesso"}
 
 
 # =============================================================================
-# AUTH — Login
+# LOGIN
 # =============================================================================
-
 @app.post("/login", tags=["Auth"])
 def login(data: LoginSchema):
-    """
-    Valida credenciais e retorna JWT.
-    - Busca o usuário pelo login
-    - Compara senha com hash bcrypt
-    - Retorna token JWT com payload: sub (id), usuario, nome
-    """
+    user_clean = data.usuario.strip().lower()
+    
     with get_session() as session:
         result = session.run(
             """
             MATCH (u:Usuario {usuario: $usuario})
             RETURN u.id AS id, u.nome AS nome,
-                   u.usuario AS usuario, u.senha_hash AS senha_hash
+                   u.usuario AS usuario, u.senha_hash AS senha_hash, u.perfil_atual AS perfil
             """,
-            usuario=data.usuario
+            usuario=user_clean
         ).single()
 
     if not result:
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
-
     if not verificar_senha(data.senha, result["senha_hash"]):
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
@@ -164,24 +144,20 @@ def login(data: LoginSchema):
         "usuario": result["usuario"],
         "nome":    result["nome"],
     })
-
     return {
-        "token":      token,
-        "usuario_id": result["id"],
-        "nome":       result["nome"],
+        "token": token, 
+        "usuario_id": result["id"], 
+        "nome": result["nome"],
+        "perfil_atual": result["perfil"] if "perfil" in result.keys() and result["perfil"] else "Dev Junior",
+        "status": "sucesso"
     }
 
 
 # =============================================================================
 # PERFIL
 # =============================================================================
-
 @app.get("/perfil/{usuario_id}", tags=["Perfil"])
 def get_perfil(usuario_id: str, atual=Depends(get_usuario_atual)):
-    """
-    Retorna dados do usuário + habilidades que ele possui.
-    Endpoint protegido por JWT.
-    """
     with get_session() as session:
         usuario = session.run(
             """
@@ -191,7 +167,6 @@ def get_perfil(usuario_id: str, atual=Depends(get_usuario_atual)):
             """,
             id=usuario_id
         ).single()
-
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
@@ -205,15 +180,38 @@ def get_perfil(usuario_id: str, atual=Depends(get_usuario_atual)):
         )
         habilidades = [dict(r) for r in habilidades]
 
-    return {**dict(usuario), "habilidades": habilidades}
+    return {
+        "id": usuario["id"],
+        "nome": usuario["nome"],
+        "usuario": usuario["usuario"],
+        "perfil_atual": usuario["perfil_atual"] or "Dev Junior",
+        "habilidades": habilidades
+    }
+
+
+@app.post("/habilidades", tags=["Perfil"])
+def criar_habilidade(data: HabilidadeSchema, atual=Depends(get_usuario_atual)):
+    with get_session() as session:
+        existente = session.run(
+            "MATCH (h:Habilidade {nome: $nome}) RETURN h",
+            nome=data.nome
+        ).single()
+        if existente:
+            raise HTTPException(status_code=409, detail=f"Habilidade '{data.nome}' já existe")
+
+        result_count = session.run("MATCH (h:Habilidade) RETURN count(h) AS total").single()
+        total = result_count.value("total") if result_count else 0
+        novo_id = f"H{str(int(total) + 1).zfill(3)}"
+
+        session.run(
+            "CREATE (h:Habilidade {id: $id, nome: $nome, tipo: 'hard'})",
+            id=novo_id, nome=data.nome
+        )
+    return {"id": novo_id, "nome": data.nome, "mensagem": "Habilidade criada com sucesso"}
 
 
 @app.get("/habilidades", tags=["Perfil"])
 def listar_habilidades(atual=Depends(get_usuario_atual)):
-    """
-    Lista todas as habilidades cadastradas no banco.
-    Usado para popular o seletor na página de perfil.
-    """
     with get_session() as session:
         result = session.run(
             """
@@ -225,31 +223,116 @@ def listar_habilidades(atual=Depends(get_usuario_atual)):
         return {"habilidades": [dict(r) for r in result]}
 
 
+@app.put("/perfil/{usuario_id}", tags=["Perfil"])
+def atualizar_perfil(usuario_id: str, data: PerfilUpdateSchema, atual=Depends(get_usuario_atual)):
+    with get_session() as session:
+        usuario = session.run(
+            "MATCH (u:Usuario {id: $id}) RETURN u.senha_hash AS senha_hash",
+            id=usuario_id
+        ).single()
+        if not usuario:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        if not verificar_senha(data.senha, usuario["senha_hash"]):
+            raise HTTPException(status_code=401, detail="Senha incorreta")
+
+        sets = []
+        params = {"id": usuario_id}
+
+        if data.usuario is not None:
+            user_clean = data.usuario.strip().lower()
+            existente = session.run(
+                "MATCH (u:Usuario {usuario: $usuario}) WHERE u.id <> $id RETURN u",
+                usuario=user_clean, id=usuario_id
+            ).single()
+            if existente:
+                raise HTTPException(status_code=409, detail="Nome de usuário já está em uso")
+            sets.append("u.usuario = $usuario")
+            params["usuario"] = user_clean
+
+        if data.nome is not None:
+            sets.append("u.nome = $nome")
+            params["nome"] = data.nome
+
+        if data.perfil_atual is not None:
+            sets.append("u.perfil_atual = $perfil_atual")
+            params["perfil_atual"] = data.perfil_atual
+
+        if not sets:
+            raise HTTPException(status_code=400, detail="Nenhum campo para atualizar")
+
+        session.run(
+            f"MATCH (u:Usuario {{id: $id}}) SET {', '.join(sets)}",
+            **params
+        )
+
+    return {"mensagem": "Perfil atualizado com sucesso"}
+
+
+@app.get("/cursos-por-habilidade/{nome}", tags=["Recomendação"])
+def cursos_por_habilidade(nome: str, atual=Depends(get_usuario_atual)):
+    with get_session() as session:
+        result = session.run(
+            """
+            MATCH (curso:Curso)-[:ENSINA]->(h:Habilidade {nome: $nome})
+            RETURN curso.id AS id, curso.nome AS nome, curso.plataforma AS plataforma
+            ORDER BY curso.nome
+            """,
+            nome=nome
+        )
+        cursos = [dict(r) for r in result]
+    return {"cursos": cursos}
+
+
 @app.post("/perfil/{usuario_id}/habilidades", tags=["Perfil"])
 def adicionar_habilidade(usuario_id: str, data: HabilidadeSchema, atual=Depends(get_usuario_atual)):
-    """
-    Cria o relacionamento (Usuario)-[:POSSUI]->(Habilidade).
-    Usa MERGE para evitar duplicatas.
-    """
     with get_session() as session:
-        session.run(
+        result = session.run(
             """
             MATCH (u:Usuario {id: $id})
             MATCH (h:Habilidade {nome: $nome})
             MERGE (u)-[:POSSUI]->(h)
+            RETURN h.nome AS nome
             """,
             id=usuario_id,
             nome=data.nome
+        ).single()
+        if not result:
+            raise HTTPException(status_code=404, detail=f"Habilidade '{data.nome}' não encontrada no banco")
+    return {"mensagem": f"Habilidade '{data.nome}' adicionada"}
+
+
+@app.get("/almejado/{usuario_id}", tags=["Perfil"])
+def get_almejado(usuario_id: str, atual=Depends(get_usuario_atual)):
+    with get_session() as session:
+        result = session.run(
+            """
+            MATCH (u:Usuario {id: $id})-[:ALMEJA]->(c:Cargo)
+            RETURN c.id AS id, c.titulo AS titulo, c.nivel AS nivel,
+                   c.salario_medio AS salario_medio
+            """,
+            id=usuario_id
+        ).single()
+    if not result:
+        return {"almejado": None}
+    return {"almejado": dict(result)}
+
+
+@app.post("/almejar/{usuario_id}/{cargo_id}", tags=["Perfil"])
+def almejar_cargo(usuario_id: str, cargo_id: str, atual=Depends(get_usuario_atual)):
+    with get_session() as session:
+        session.run(
+            """
+            MATCH (u:Usuario {id: $uid})
+            MATCH (c:Cargo {id: $cid})
+            MERGE (u)-[:ALMEJA]->(c)
+            """,
+            uid=usuario_id, cid=cargo_id
         )
-    return {"mensagem": f"Habilidade '{data.nome}' adicionada com sucesso"}
+    return {"mensagem": "Carreira salva como objetivo"}
 
 
 @app.delete("/perfil/{usuario_id}/habilidades/{nome}", tags=["Perfil"])
 def remover_habilidade(usuario_id: str, nome: str, atual=Depends(get_usuario_atual)):
-    """
-    Remove o relacionamento (Usuario)-[:POSSUI]->(Habilidade).
-    Não apaga o nó Habilidade, apenas a aresta.
-    """
     with get_session() as session:
         session.run(
             """
@@ -259,13 +342,12 @@ def remover_habilidade(usuario_id: str, nome: str, atual=Depends(get_usuario_atu
             id=usuario_id,
             nome=nome
         )
-    return {"mensagem": f"Habilidade '{nome}' removida com sucesso"}
+    return {"mensagem": f"Habilidade '{nome}' removida"}
 
 
 # =============================================================================
 # USUÁRIOS
 # =============================================================================
-
 @app.get("/usuarios", tags=["Usuários"])
 def listar_usuarios():
     with get_session() as session:
@@ -285,104 +367,93 @@ def listar_usuarios():
 # =============================================================================
 # RECOMENDAÇÃO
 # =============================================================================
-
 @app.get("/recomendar/{usuario_id}", tags=["Recomendação"])
 def recomendar_cargos(usuario_id: str, atual=Depends(get_usuario_atual)):
-    """
-    Ranking de Cargos com Match Score baseado nas habilidades do usuário.
-
-    Lógica Cypher:
-        1. Coleta habilidades que o usuário POSSUI
-        2. Para cada Cargo, coleta habilidades que ele EXIGE
-        3. Calcula interseção (possuídas) e diferença (gaps)
-        4. Match Score = possuídas / exigidas * 100
-        5. Ordena por score DESC
-    """
     with get_session() as session:
         usuario = session.run(
             "MATCH (u:Usuario {id: $id}) RETURN u.nome AS nome, u.perfil_atual AS perfil_atual",
             id=usuario_id
         ).single()
-
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-        result = session.run(
-            """
-            MATCH (u:Usuario {id: $usuario_id})-[:POSSUI]->(h_user:Habilidade)
-            WITH u, collect(h_user) AS habilidades_usuario
-
-            MATCH (c:Cargo)-[:EXIGE]->(h_cargo:Habilidade)
-            WITH c, habilidades_usuario, collect(DISTINCT h_cargo) AS habilidades_exigidas
-
-            WITH c,
-                 [h IN habilidades_exigidas | h.nome] AS exigidas,
-                 [h IN habilidades_exigidas WHERE h IN habilidades_usuario | h.nome] AS possuidas
-
-            WITH c, exigidas, possuidas,
-                 [h IN exigidas WHERE NOT h IN possuidas] AS gaps,
-                 CASE size(exigidas)
-                     WHEN 0 THEN 0
-                     ELSE round(toFloat(size(possuidas)) / size(exigidas) * 100)
-                 END AS match_score
-
-            RETURN
-                c.id            AS id,
-                c.titulo        AS titulo,
-                c.nivel         AS nivel,
-                c.salario_medio AS salario_medio,
-                exigidas,
-                possuidas,
-                gaps,
-                match_score
-            ORDER BY match_score DESC
-            """,
-            usuario_id=usuario_id
+        habs_result = session.run(
+            "MATCH (u:Usuario {id: $id})-[:POSSUI]->(h:Habilidade) RETURN h.nome AS nome",
+            id=usuario_id
         )
-        cargos = [dict(r) for r in result]
+        habilidades_usuario = [r["nome"] for r in habs_result]
 
-    return {"usuario": dict(usuario), "total_cargos": len(cargos), "ranking": cargos}
+        cargos_result = session.run(
+            """
+            MATCH (c:Cargo)-[:EXIGE]->(h:Habilidade)
+            RETURN c.id AS id, c.titulo AS titulo, c.nivel AS nivel,
+                   c.salario_medio AS salario_medio,
+                   collect(h.nome) AS exigidas
+            """
+        )
+
+        ranking = []
+        for row in cargos_result:
+            exigidas  = row["exigidas"]
+            possuidas = [h for h in exigidas if h in habilidades_usuario]
+            gaps      = [h for h in exigidas if h not in habilidades_usuario]
+            score     = round(len(possuidas) / len(exigidas) * 100) if exigidas else 0
+            ranking.append({
+                "id":            row["id"],
+                "titulo":        row["titulo"],
+                "nivel":         row["nivel"],
+                "salario_medio": row["salario_medio"],
+                "exigidas":      exigidas,
+                "possuidas":     possuidas,
+                "gaps":          gaps,
+                "match_score":   score,
+            })
+
+        ranking.sort(key=lambda x: x["match_score"], reverse=True)
+
+    return {"usuario": dict(usuario), "total_cargos": len(ranking), "ranking": ranking}
 
 
+# =============================================================================
+# CURSOS
+# =============================================================================
 @app.get("/cursos/{usuario_id}", tags=["Recomendação"])
 def recomendar_cursos(usuario_id: str, atual=Depends(get_usuario_atual)):
-    """
-    Cursos que cobrem os gaps do usuário, ordenados por quantos gaps cobrem.
-    """
     with get_session() as session:
         usuario = session.run(
             "MATCH (u:Usuario {id: $id}) RETURN u.nome AS nome",
             id=usuario_id
         ).single()
-
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-        result = session.run(
-            """
-            MATCH (u:Usuario {id: $usuario_id})-[:POSSUI]->(h_possui:Habilidade)
-            WITH u, collect(h_possui) AS tem
-
-            MATCH (c:Cargo)-[:EXIGE]->(h_gap:Habilidade)
-            WHERE NOT h_gap IN tem
-
-            MATCH (curso:Curso)-[:ENSINA]->(h_gap)
-
-            WITH curso,
-                 collect(DISTINCT h_gap.nome) AS habilidades_ensinadas,
-                 count(DISTINCT h_gap)        AS gaps_cobertos
-
-            RETURN
-                curso.id         AS id,
-                curso.nome       AS nome,
-                curso.plataforma AS plataforma,
-                habilidades_ensinadas,
-                gaps_cobertos
-            ORDER BY gaps_cobertos DESC
-            """,
-            usuario_id=usuario_id
+        habs_result = session.run(
+            "MATCH (u:Usuario {id: $id})-[:POSSUI]->(h:Habilidade) RETURN h.nome AS nome",
+            id=usuario_id
         )
-        cursos = [dict(r) for r in result]
+        habilidades_usuario = [r["nome"] for r in habs_result]
+
+        cursos_result = session.run(
+            """
+            MATCH (curso:Curso)-[:ENSINA]->(h:Habilidade)
+            RETURN curso.id AS id, curso.nome AS nome, curso.plataforma AS plataforma,
+                   collect(h.nome) AS habilidades_ensinadas
+            """
+        )
+
+        cursos = []
+        for row in cursos_result:
+            gaps_cobertos = [h for h in row["habilidades_ensinadas"] if h not in habilidades_usuario]
+            if gaps_cobertos:
+                cursos.append({
+                    "id":                   row["id"],
+                    "nome":                 row["nome"],
+                    "plataforma":           row["plataforma"],
+                    "habilidades_ensinadas": gaps_cobertos,
+                    "gaps_cobertos":        len(gaps_cobertos),
+                })
+
+        cursos.sort(key=lambda x: x["gaps_cobertos"], reverse=True)
 
     return {"usuario": usuario["nome"], "total_cursos": len(cursos), "cursos": cursos}
 
@@ -390,67 +461,67 @@ def recomendar_cursos(usuario_id: str, atual=Depends(get_usuario_atual)):
 # =============================================================================
 # GRAFO
 # =============================================================================
-
 @app.get("/grafo/{usuario_id}", tags=["Visualização"])
 def dados_grafo(usuario_id: str, atual=Depends(get_usuario_atual)):
-    """
-    Retorna nós e arestas formatados para o react-force-graph-2d.
-    """
     with get_session() as session:
         usuario = session.run(
             "MATCH (u:Usuario {id: $id}) RETURN u.id AS id, u.nome AS nome",
             id=usuario_id
         ).single()
-
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-        result = session.run(
+        habs = session.run(
+            "MATCH (u:Usuario {id: $id})-[:POSSUI]->(h:Habilidade) RETURN h.id AS id, h.nome AS nome, h.tipo AS tipo",
+            id=usuario_id
+        )
+        habilidades = [dict(r) for r in habs]
+
+        almejados_res = session.run(
+            "MATCH (u:Usuario {id: $id})-[:ALMEJA]->(c:Cargo) RETURN c.id AS id, c.titulo AS titulo, c.nivel AS nivel, c.salario_medio AS salario_medio",
+            id=usuario_id
+        )
+        almejados = [dict(r) for r in almejados_res]
+
+        hab_nomes = [h["nome"] for h in habilidades]
+        recomendados_res = session.run(
             """
-            MATCH (u:Usuario {id: $usuario_id})
-            OPTIONAL MATCH (u)-[:POSSUI]->(h:Habilidade)
-            OPTIONAL MATCH (u)-[:ALMEJA]->(ca:Cargo)
-            OPTIONAL MATCH (u)-[:POSSUI]->(h2:Habilidade)<-[:EXIGE]-(cr:Cargo)
-            WITH u,
-                 collect(DISTINCT h)  AS habilidades,
-                 collect(DISTINCT ca) AS almejados,
-                 collect(DISTINCT cr) AS recomendados
-            RETURN u, habilidades, almejados, recomendados
+            MATCH (c:Cargo)-[:EXIGE]->(h:Habilidade)
+            WHERE h.nome IN $habs
+            RETURN DISTINCT c.id AS id, c.titulo AS titulo, c.nivel AS nivel, c.salario_medio AS salario_medio
+            LIMIT 6
             """,
-            usuario_id=usuario_id
-        ).single()
+            habs=hab_nomes
+        )
+        recomendados = [dict(r) for r in recomendados_res]
 
         nodes, links = [], []
         ids_adicionados = set()
 
         def add_node(node_id, label, node_type, extra=None):
-            if node_id not in ids_adicionados:
+            if node_id and node_id not in ids_adicionados:
                 entry = {"id": node_id, "label": label, "type": node_type}
                 if extra:
                     entry.update(extra)
                 nodes.append(entry)
                 ids_adicionados.add(node_id)
 
-        u = result["u"]
-        add_node(u["id"], u["nome"], "usuario")
+        u_id = usuario["id"]
+        add_node(u_id, usuario["nome"], "usuario")
 
-        for h in result["habilidades"]:
-            if h:
-                add_node(h["id"], h["nome"], "habilidade", {"tipo": h.get("tipo")})
-                links.append({"source": u["id"], "target": h["id"], "label": "POSSUI"})
+        for h in habilidades:
+            h_id = h["id"] or h["nome"]
+            add_node(h_id, h["nome"], "habilidade", {"tipo": h.get("tipo")})
+            links.append({"source": u_id, "target": h_id, "label": "POSSUI"})
 
-        for ca in result["almejados"]:
-            if ca:
-                add_node(ca["id"], ca["titulo"], "cargo_almejado",
-                         {"nivel": ca.get("nivel"), "salario_medio": ca.get("salario_medio")})
-                links.append({"source": u["id"], "target": ca["id"], "label": "ALMEJA"})
+        for ca in almejados:
+            add_node(ca["id"], ca["titulo"], "cargo_almejado")
+            links.append({"source": u_id, "target": ca["id"], "label": "ALMEJA"})
 
-        for cr in result["recomendados"]:
-            if cr:
-                add_node(cr["id"], cr["titulo"], "cargo_recomendado",
-                         {"nivel": cr.get("nivel"), "salario_medio": cr.get("salario_medio")})
-                for h in result["habilidades"]:
-                    if h:
-                        links.append({"source": h["id"], "target": cr["id"], "label": "EXIGE"})
+        for cr in recomendados:
+            add_node(cr["id"], cr["titulo"], "cargo_recomendado")
+            for h in habilidades:
+                h_id = h["id"] or h["nome"]
+                links.append({"source": h_id, "target": cr["id"], "label": "EXIGE"})
 
     return {"nodes": nodes, "links": links}

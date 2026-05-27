@@ -1,0 +1,88 @@
+// ============================================================================
+// SCRIPT DE POPULAÇÃO - CAREERMATCH (NEO4J GRAPH DATABASE)
+// INSTRUÇÕES: Copie e execute um bloco de cada vez no Neo4j Query Browser.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// PASSO 1: Injeção de Habilidades Base (Hard e Soft Skills)
+// ----------------------------------------------------------------------------
+UNWIND ["Python", "Java", "C#", "C++", "JavaScript", "TypeScript", "React", "Angular", "Vue", "Node.js", "Spring Boot", "Django", "Flask", "FastAPI", "Go", "Rust", "Ruby", "PHP", "Swift", "Kotlin", "Flutter", "React Native", "SQL", "PostgreSQL", "MySQL", "MongoDB", "Redis", "Elasticsearch", "Cassandra", "Neo4j", "AWS", "Azure", "Google Cloud", "Docker", "Kubernetes", "Terraform", "Ansible", "Jenkins", "Linux", "Bash", "Cybersecurity", "Penetration Testing", "Cryptography", "Machine Learning", "Deep Learning", "Data Science", "Pandas", "Spark", "Hadoop", "Kafka", "Scrum", "Kanban", "Agile", "Comunicação", "Liderança", "Resolução de Problemas", "Arquitetura de Sistemas", "Microserviços", "GraphQL", "REST APIs", "Figma", "UI/UX"] AS skill
+MERGE (h:Habilidade {nome: skill})
+SET h.tipo = CASE 
+    WHEN skill IN ["Scrum", "Kanban", "Agile", "Comunicação", "Liderança", "Resolução de Problemas"] THEN "Soft Skill" 
+    ELSE "Hard Skill" 
+END;
+
+// ----------------------------------------------------------------------------
+// PASSO 2: Matriz Combinatória de Cargos e Relacionamentos [:EXIGE]
+// Gera centenas de cargos únicos cruzando Domínios e Níveis de Senioridade.
+// Utiliza Subqueries (CALL) para distribuir milhares de conexões randômicas.
+// ----------------------------------------------------------------------------
+WITH ["Frontend", "Backend", "Fullstack", "DevOps", "Cloud", "Data", "Security", "Mobile", "AI", "QA"] AS domains,
+     ["Developer", "Engineer", "Architect", "Analyst", "Scientist", "Consultant", "Specialist"] AS roles,
+     ["Junior", "Pleno", "Senior", "Lead", "Staff", "Principal"] AS levels
+
+UNWIND domains AS domain
+UNWIND roles AS role
+UNWIND levels AS level
+
+WITH domain + " " + role + " " + level AS titulo_unico, level, toInteger(rand() * 15000 + 3000) AS salario
+MERGE (c:Cargo {titulo: titulo_unico})
+SET c.id = randomUUID(), 
+    c.nivel = level, 
+    c.salario_medio = salario
+
+WITH c
+CALL (c) {
+    MATCH (h:Habilidade)
+    WITH c, h ORDER BY rand() LIMIT toInteger(rand() * 8 + 5)
+    MERGE (c)-[:EXIGE]->(h)
+};
+
+// ----------------------------------------------------------------------------
+// PASSO 3: Hub de Cursos e Relacionamentos [:ENSINA]
+// Gera centenas de cursos simulando plataformas reais do mercado de TI.
+// Utiliza Subqueries (CALL) para mapear quais tecnologias cada curso ensina.
+// ----------------------------------------------------------------------------
+WITH ["Bootcamp de", "Masterclass:", "Formação Avançada em", "Especialização:", "Fundamentos de", "Imersão em"] AS prefixes,
+     ["Udemy", "Coursera", "Alura", "Rocketseat", "Pluralsight", "AWS Training", "Google Cloud Skills", "DataCamp"] AS platforms
+MATCH (base_h:Habilidade)
+WITH prefixes, platforms, collect(base_h) AS all_skills
+
+UNWIND range(1, 200) AS i
+WITH prefixes[toInteger(rand() * size(prefixes))] AS prefix,
+     platforms[toInteger(rand() * size(platforms))] AS platform,
+     all_skills, i
+     
+WITH prefix, platform, all_skills[toInteger(rand() * size(all_skills))].nome AS main_skill
+WITH prefix + " " + main_skill AS nome_curso, platform
+
+MERGE (cu:Curso {nome: nome_curso, plataforma: platform})
+SET cu.id = randomUUID()
+
+WITH cu
+CALL (cu) {
+    MATCH (h:Habilidade)
+    WITH cu, h ORDER BY rand() LIMIT toInteger(rand() * 6 + 3)
+    MERGE (cu)-[:ENSINA]->(h)
+};
+
+// ----------------------------------------------------------------------------
+// PASSO 4: Motor de Objetivos de Carreira [:ALMEJA]
+// AVISO: Execute este comando APENAS APÓS criar seus usuários no sistema.
+// Ele varre o banco lendo a profissão atual de cada usuário e traça uma meta 
+// para o próximo nível lógico de progressão de carreira.
+// ----------------------------------------------------------------------------
+MATCH (u:Usuario)
+WITH u, 
+     CASE 
+         WHEN u.perfil_atual CONTAINS "Junior" THEN "Pleno"
+         WHEN u.perfil_atual CONTAINS "Pleno" THEN "Senior"
+         WHEN u.perfil_atual CONTAINS "Senior" THEN "Lead"
+         ELSE "Senior"
+     END AS nivel_almejado
+
+MATCH (c:Cargo {nivel: nivel_almejado})
+WHERE split(c.titulo, " ")[0] = split(u.perfil_atual, " ")[0]
+WITH u, c LIMIT 1
+MERGE (u)-[:ALMEJA]->(c);
