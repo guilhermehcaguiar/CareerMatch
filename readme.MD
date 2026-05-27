@@ -268,6 +268,11 @@ Cargos com score ≥ 70% são verdes, entre 40-69% são amarelos, abaixo são ve
 
 ## 👥 Autores
 
-Projeto desenvolvido como trabalho acadêmico para a disciplina de **[nome da disciplina]** do curso **[nome do curso]** na **[instituição]** .
+Projeto desenvolvido como trabalho acadêmico para a disciplina de **Database Application** do curso **Ciências da Computação** na **Uninassau** .
 
-- **Guilherme Aguiar** — Desenvolvimento Full Stack
+- **Arthur Augusto**
+- **Arthur Martins**
+- **Carlos Matheus**
+- **Gabriel Fernando**
+- **Guilherme Aguiar**
+- **Guilherme Juarez**
